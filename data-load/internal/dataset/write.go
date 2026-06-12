@@ -15,12 +15,12 @@ func saveToCSV(filePath string, data []PowerConsumption) error {
 	defer file.Close()
 
 	writer := bufio.NewWriter(file)
-	_, err = writer.WriteString("Date,Time,GlobalActivePower,GlobalReactivePower,Voltage,GlobalIntensity,SubMetering1,SubMetering2,SubMetering3,SubMeteringTotal,Hour,DayOfWeek,Month,HighConsumption,OtherConsumption\n")
+	_, err = writer.WriteString("Date,Time,GlobalActivePower,GlobalReactivePower,Voltage,GlobalIntensity,SubMetering1,SubMetering2,SubMetering3,SubMeteringTotal,Hour,DayOfWeek,DayOfMonth,Month,HighConsumption,OtherConsumption\n")
 	if err != nil {
 		return err
 	}
 	for _, record := range data {
-		line := fmt.Sprintf("%s,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f\n",
+		line := fmt.Sprintf("%s,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%.3f\n",
 			record.Date,
 			record.Time,
 			record.GlobalActivePower,
@@ -33,6 +33,7 @@ func saveToCSV(filePath string, data []PowerConsumption) error {
 			record.SubMeteringTotal,
 			record.Hour,
 			record.DayOfWeek,
+			record.DayOfMonth,
 			record.Month,
 			record.HighConsumption,
 			record.OtherConsumption,
@@ -85,6 +86,37 @@ func saveAggregatesCSV(filePath string, aggregates []DemandAggregate) error {
 	for _, aggregate := range aggregates {
 		line := fmt.Sprintf("%s,%d,%.6f,%d,%.6f,%.6f\n",
 			aggregate.Group,
+			aggregate.Records,
+			aggregate.AverageActivePower,
+			aggregate.HighConsumption,
+			aggregate.HighConsumptionRate,
+			aggregate.AverageOther,
+		)
+		if _, err := writer.WriteString(line); err != nil {
+			return err
+		}
+	}
+
+	return writer.Flush()
+}
+
+func saveCombinedAggregatesCSV(filePath string, aggregates []CombinedDemandAggregate) error {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	_, err = writer.WriteString("PrimaryGroup,SecondaryGroup,Records,AverageActivePower,HighConsumption,HighConsumptionRate,AverageOtherConsumption\n")
+	if err != nil {
+		return err
+	}
+
+	for _, aggregate := range aggregates {
+		line := fmt.Sprintf("%s,%s,%d,%.6f,%d,%.6f,%.6f\n",
+			aggregate.PrimaryGroup,
+			aggregate.SecondaryGroup,
 			aggregate.Records,
 			aggregate.AverageActivePower,
 			aggregate.HighConsumption,

@@ -1,5 +1,22 @@
 # Parte A - Dataset limpio, analisis sostenible y modelo ML
 
+## Ejecucion
+
+Desde la raiz del proyecto:
+
+```powershell
+go -C data-load run ./cmd
+```
+
+La ejecucion imprime estadisticas de calidad, metricas del modelo y tiempos en
+milisegundos por etapa, junto con su suma total.
+
+Documentacion complementaria:
+
+- `docs/PRESENTACION.md`: contenido organizado para exponer el caso.
+- `docs/EXPLICACION_PROCESO.md`: explicacion detallada del flujo, variables,
+  archivos generados y reporte final.
+
 ## Mision del negocio
 
 La solucion busca apoyar la eficiencia energetica domestica mediante el analisis de consumo electrico. El objetivo no es solo procesar datos, sino detectar horarios y patrones de alto consumo para promover decisiones sostenibles: reducir picos, desplazar actividades intensivas y mejorar el monitoreo del uso de energia en el hogar.
@@ -41,9 +58,14 @@ Variables creadas para ML:
 Artefactos generados:
 
 - `data/processed/processed_data.csv`: dataset limpio y listo para ML.
+- `data/processed/training_data.csv`: 80% temporal usado para entrenamiento.
+- `data/processed/test_data.csv`: 20% temporal reservado para evaluacion.
 - `data/processed/hourly_demand.csv`: demanda agregada por hora.
 - `data/processed/daily_demand.csv`: demanda agregada por dia de semana.
 - `data/processed/monthly_demand.csv`: demanda agregada por mes.
+- `data/processed/day_hour_demand.csv`: horas analizadas dentro de cada dia.
+- `data/processed/calendar_date_demand.csv`: fechas recurrentes como `December 25`.
+- `data/processed/month_hour_demand.csv`: horas analizadas dentro de cada mes.
 - `data/processed/sustainability_report.json`: resumen de picos y recomendaciones.
 
 ## Diseno del modelo ML
@@ -67,7 +89,10 @@ Features:
 
 No se usa `GlobalActivePower` como feature directa del modelo porque la etiqueta `HighConsumption` se define a partir de esa variable. Asi se evita que el modelo aprenda solo una regla trivial y se orienta la prediccion hacia variables operativas y temporales.
 
-El objetivo del modelo no es maximizar complejidad, sino demostrar un entrenamiento funcional y paralelo alineado con sostenibilidad. El modelo entrenado se guarda como JSON en `data/processed/logistic_model.json`, incluyendo pesos, cantidad de filas, numero de workers, accuracy y loss.
+El dataset se divide conservando el orden temporal: el 80% mas antiguo se usa
+para entrenamiento y el 20% mas reciente para prueba. El modelo se guarda en
+`data/processed/logistic_model.json` con sus pesos, hiperparametros, matriz de
+confusion y metricas separadas para entrenamiento y prueba.
 
 ## Analisis para sostenibilidad
 
@@ -76,6 +101,7 @@ Los archivos agregados permiten interpretar el comportamiento energetico:
 - `hourly_demand.csv` ayuda a identificar horas pico y franjas de mayor demanda domestica.
 - `daily_demand.csv` permite revisar si ciertos dias concentran mayor proporcion de alto consumo.
 - `monthly_demand.csv` permite observar estacionalidad o cambios de demanda por mes.
+- Los CSV detallados permiten investigar patrones por dia, mes, hora y fecha.
 - `sustainability_report.json` resume los principales horarios, dias y meses criticos para proponer recomendaciones.
 
 Cada agregado incluye:

@@ -8,15 +8,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type byteRange struct {
+	Index int
 	Start int64
 	End   int64
 }
 
 func LoadData(root string, workers, total, chunkSize int) {
 	var wg sync.WaitGroup
+	stageDurations := make([]stageDuration, 0, 7)
 
 	if workers <= 0 {
 		workers = 1
@@ -29,6 +32,7 @@ func LoadData(root string, workers, total, chunkSize int) {
 		return
 	}
 
+	stageStart := time.Now()
 	jobs := buildByteJobs(fileInfo.Size(), workers)
 	jobChan := make(chan byteRange, len(jobs))
 	for _, job := range jobs {
@@ -48,6 +52,7 @@ func LoadData(root string, workers, total, chunkSize int) {
 					fmt.Printf("Error loading chunk: %v\n", err)
 					continue
 				}
+				chunkData.Index = job.Index
 				resultChan <- chunkData
 			}
 		}()
@@ -58,16 +63,24 @@ func LoadData(root string, workers, total, chunkSize int) {
 		close(resultChan)
 	}()
 
-	cleanData := make([]PowerConsumption, 0, total)
+	orderedChunks := make([][]PowerConsumption, len(jobs))
 	var stats LoadStats
 	for result := range resultChan {
-		cleanData = mergeChunks(cleanData, result.Records)
+		orderedChunks[result.Index] = result.Records
 		stats.Add(result.Stats)
 	}
 
 	wg.Wait()
+	cleanData := make([]PowerConsumption, 0, total)
+	for _, records := range orderedChunks {
+		cleanData = mergeChunks(cleanData, records)
+	}
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Carga y limpieza paralela",
+		Duration: time.Since(stageStart),
+	})
 
-	//load data into csv
+	stageStart = time.Now()
 	outputDir := filepath.Join(root, "data", "processed")
 	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 		fmt.Printf("Error creating output directory: %v\n", err)
@@ -78,40 +91,79 @@ func LoadData(root string, workers, total, chunkSize int) {
 		fmt.Printf("Error saving to CSV: %v\n", err)
 		return
 	}
+	trainingData, testData := splitTrainTest(cleanData, modelTrainRatio)
+	if err := saveToCSV(filepath.Join(outputDir, "training_data.csv"), trainingData); err != nil {
+		fmt.Printf("Error saving training dataset: %v\n", err)
+		return
+	}
+	if err := saveToCSV(filepath.Join(outputDir, "test_data.csv"), testData); err != nil {
+		fmt.Printf("Error saving test dataset: %v\n", err)
+		return
+	}
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Escritura de datasets limpio/train/test",
+		Duration: time.Since(stageStart),
+	})
 
-	hourlyDemand := aggregateBy(cleanData, func(record PowerConsumption) string {
-		return fmt.Sprintf("%02d:00", record.Hour)
+	stageStart = time.Now()
+	demandAnalysis := analyzeDemand(cleanData)
+	report := buildSustainabilityReportFromAnalysis(demandAnalysis)
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Analisis de demanda y sostenibilidad",
+		Duration: time.Since(stageStart),
 	})
-	dailyDemand := aggregateBy(cleanData, func(record PowerConsumption) string {
-		return dayName(record.DayOfWeek)
-	})
-	monthlyDemand := aggregateBy(cleanData, func(record PowerConsumption) string {
-		return monthName(record.Month)
-	})
-	if err := saveAggregatesCSV(filepath.Join(outputDir, "hourly_demand.csv"), hourlyDemand); err != nil {
+
+	stageStart = time.Now()
+	if err := saveAggregatesCSV(filepath.Join(outputDir, "hourly_demand.csv"), demandAnalysis.Hourly); err != nil {
 		fmt.Printf("Error saving hourly demand analysis: %v\n", err)
 		return
 	}
-	if err := saveAggregatesCSV(filepath.Join(outputDir, "daily_demand.csv"), dailyDemand); err != nil {
+	if err := saveAggregatesCSV(filepath.Join(outputDir, "daily_demand.csv"), demandAnalysis.Daily); err != nil {
 		fmt.Printf("Error saving daily demand analysis: %v\n", err)
 		return
 	}
-	if err := saveAggregatesCSV(filepath.Join(outputDir, "monthly_demand.csv"), monthlyDemand); err != nil {
+	if err := saveAggregatesCSV(filepath.Join(outputDir, "monthly_demand.csv"), demandAnalysis.Monthly); err != nil {
 		fmt.Printf("Error saving monthly demand analysis: %v\n", err)
 		return
 	}
-	report := buildSustainabilityReport(cleanData)
+	if err := saveCombinedAggregatesCSV(filepath.Join(outputDir, "day_hour_demand.csv"), demandAnalysis.DayHour); err != nil {
+		fmt.Printf("Error saving day-hour demand analysis: %v\n", err)
+		return
+	}
+	if err := saveAggregatesCSV(filepath.Join(outputDir, "calendar_date_demand.csv"), demandAnalysis.CalendarDate); err != nil {
+		fmt.Printf("Error saving calendar-date demand analysis: %v\n", err)
+		return
+	}
+	if err := saveCombinedAggregatesCSV(filepath.Join(outputDir, "month_hour_demand.csv"), demandAnalysis.MonthHour); err != nil {
+		fmt.Printf("Error saving month-hour demand analysis: %v\n", err)
+		return
+	}
 	if err := saveSustainabilityReportJSON(filepath.Join(outputDir, "sustainability_report.json"), report); err != nil {
 		fmt.Printf("Error saving sustainability report: %v\n", err)
 		return
 	}
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Escritura de reportes de analisis",
+		Duration: time.Since(stageStart),
+	})
 
-	model := trainLogisticModel(cleanData, workers)
+	stageStart = time.Now()
+	model := trainLogisticModel(trainingData, testData, workers)
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Entrenamiento y evaluacion ML paralelos",
+		Duration: time.Since(stageStart),
+	})
+
+	stageStart = time.Now()
 	modelFile := filepath.Join(outputDir, "logistic_model.json")
 	if err := saveModelJSON(modelFile, model); err != nil {
 		fmt.Printf("Error saving ML model: %v\n", err)
 		return
 	}
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Escritura del modelo ML",
+		Duration: time.Since(stageStart),
+	})
 
 	fmt.Printf("Rows read: %d\n", stats.LinesRead)
 	fmt.Printf("Rows clean: %d\n", stats.RowsClean)
@@ -119,9 +171,49 @@ func LoadData(root string, workers, total, chunkSize int) {
 	fmt.Printf("Rows dropped by invalid values: %d\n", stats.DroppedInvalid)
 	fmt.Printf("ML model: %s\n", model.ModelType)
 	fmt.Printf("ML parallel workers: %d\n", model.Workers)
-	fmt.Printf("ML accuracy: %.4f\n", model.Accuracy)
-	fmt.Printf("ML loss: %.4f\n", model.Loss)
+	fmt.Printf("ML split: %s (train=%d, test=%d)\n", model.SplitStrategy, model.TrainRows, model.TestRows)
+	printClassificationMetrics("Training metrics", model.TrainingMetrics)
+	printClassificationMetrics("Test metrics", model.TestMetrics)
 	fmt.Printf("Sustainability report: %s\n", filepath.Join(outputDir, "sustainability_report.json"))
+	printTimingSummary(stageDurations)
+}
+
+func printClassificationMetrics(title string, metrics ClassificationMetrics) {
+	fmt.Printf("\n%s:\n", title)
+	fmt.Printf("- Accuracy:          %.4f\n", metrics.Accuracy)
+	fmt.Printf("- Precision:         %.4f\n", metrics.Precision)
+	fmt.Printf("- Recall:            %.4f\n", metrics.Recall)
+	fmt.Printf("- Specificity:       %.4f\n", metrics.Specificity)
+	fmt.Printf("- F1 score:          %.4f\n", metrics.F1Score)
+	fmt.Printf("- Balanced accuracy: %.4f\n", metrics.BalancedAccuracy)
+	fmt.Printf("- Positive rate:     %.4f\n", metrics.PositiveRate)
+	fmt.Printf("- Loss:              %.4f\n", metrics.Loss)
+	fmt.Printf("- Confusion matrix:  TP=%d TN=%d FP=%d FN=%d\n",
+		metrics.TruePositive,
+		metrics.TrueNegative,
+		metrics.FalsePositive,
+		metrics.FalseNegative,
+	)
+}
+
+type stageDuration struct {
+	Name     string
+	Duration time.Duration
+}
+
+func printTimingSummary(stages []stageDuration) {
+	var total time.Duration
+
+	fmt.Println("\nMetricas de tiempo:")
+	for _, stage := range stages {
+		total += stage.Duration
+		fmt.Printf("- %-40s %12.3f ms\n", stage.Name+":", durationMilliseconds(stage.Duration))
+	}
+	fmt.Printf("- %-40s %12.3f ms\n", "TOTAL (suma de etapas):", durationMilliseconds(total))
+}
+
+func durationMilliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
 }
 
 func loadChunk(filePath string, start, end int64) (chunkResult, error) {
@@ -131,40 +223,46 @@ func loadChunk(filePath string, start, end int64) (chunkResult, error) {
 	}
 	defer file.Close()
 
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return chunkResult{}, err
-	}
-
-	reader := bufio.NewReader(file)
-	bytesRead := int64(0)
-	limit := end - start
-	if limit < 0 {
-		limit = 0
-	}
-
+	position := start
+	var reader *bufio.Reader
 	if start == 0 {
-		if _, err := reader.ReadString('\n'); err != nil {
+		reader = bufio.NewReader(file)
+		header, err := reader.ReadString('\n')
+		if err != nil {
 			if err != io.EOF {
 				return chunkResult{}, err
 			}
 			return chunkResult{}, nil
 		}
+		position += int64(len(header))
 	} else {
-		skipped, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
+		if _, err := file.Seek(start-1, io.SeekStart); err != nil {
 			return chunkResult{}, err
 		}
-		bytesRead += int64(len(skipped))
+		previousByte := make([]byte, 1)
+		if _, err := io.ReadFull(file, previousByte); err != nil {
+			return chunkResult{}, err
+		}
+
+		reader = bufio.NewReader(file)
+		if previousByte[0] != '\n' {
+			skipped, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return chunkResult{}, err
+			}
+			position += int64(len(skipped))
+		}
 	}
 
 	var chunk []PowerConsumption
 	var stats LoadStats
-	for bytesRead < limit {
+	for position < end {
 		line, err := reader.ReadString('\n')
 		if len(line) == 0 && err == io.EOF {
 			break
 		}
 		if len(line) > 0 {
+			position += int64(len(line))
 			line = strings.TrimRight(line, "\r\n")
 			if line != "" {
 				row, rowStats := processLine(line)
@@ -173,7 +271,6 @@ func loadChunk(filePath string, start, end int64) (chunkResult, error) {
 				}
 				stats.Add(rowStats)
 			}
-			bytesRead += int64(len(line))
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -204,7 +301,7 @@ func buildByteJobs(fileSize int64, workers int) []byteRange {
 		if i == workers-1 {
 			end = fileSize
 		}
-		jobs = append(jobs, byteRange{Start: start, End: end})
+		jobs = append(jobs, byteRange{Index: i, Start: start, End: end})
 	}
 	return jobs
 }

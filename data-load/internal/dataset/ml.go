@@ -6,8 +6,10 @@ import (
 )
 
 const (
-	logisticEpochs       = 80
-	logisticLearningRate = 0.25
+	logisticEpochs         = 80
+	logisticLearningRate   = 0.25
+	modelTrainRatio        = 0.80
+	modelDecisionThreshold = 0.50
 )
 
 var logisticFeatureNames = []string{
@@ -27,45 +29,84 @@ type logisticGradient struct {
 	Count  int
 }
 
-func trainLogisticModel(records []PowerConsumption, workers int) LogisticModel {
+type classificationCounts struct {
+	TruePositive  int
+	TrueNegative  int
+	FalsePositive int
+	FalseNegative int
+	Loss          float64
+	Count         int
+	Positive      int
+}
+
+func splitTrainTest(records []PowerConsumption, trainRatio float64) ([]PowerConsumption, []PowerConsumption) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	if trainRatio <= 0 || trainRatio >= 1 {
+		trainRatio = modelTrainRatio
+	}
+
+	splitIndex := int(float64(len(records)) * trainRatio)
+	if splitIndex < 1 {
+		splitIndex = 1
+	}
+	if splitIndex >= len(records) {
+		splitIndex = len(records) - 1
+	}
+	return records[:splitIndex], records[splitIndex:]
+}
+
+func trainLogisticModel(trainingRecords, testRecords []PowerConsumption, workers int) LogisticModel {
 	if workers <= 0 {
 		workers = 1
 	}
-	if len(records) == 0 {
+	if len(trainingRecords) == 0 {
 		return LogisticModel{
-			ModelType:    "logistic_regression",
-			Target:       "HighConsumption",
-			Features:     logisticFeatureNames,
-			Weights:      make([]float64, len(logisticFeatureNames)+1),
-			LearningRate: logisticLearningRate,
-			Epochs:       logisticEpochs,
-			Workers:      workers,
-			Threshold:    highConsumptionThreshold,
+			ModelType:         "logistic_regression",
+			Target:            "HighConsumption",
+			Features:          logisticFeatureNames,
+			Weights:           make([]float64, len(logisticFeatureNames)+1),
+			LearningRate:      logisticLearningRate,
+			Epochs:            logisticEpochs,
+			Workers:           workers,
+			Threshold:         highConsumptionThreshold,
+			DecisionThreshold: modelDecisionThreshold,
+			TrainRatio:        modelTrainRatio,
+			SplitStrategy:     "temporal_80_20",
 		}
 	}
 
 	weights := make([]float64, len(logisticFeatureNames)+1)
-	loss := 0.0
 	for epoch := 0; epoch < logisticEpochs; epoch++ {
-		gradient, epochLoss := computeGradientParallel(records, weights, workers)
+		gradient, _ := computeGradientParallel(trainingRecords, weights, workers)
 		for i := range weights {
 			weights[i] -= logisticLearningRate * gradient[i]
 		}
-		loss = epochLoss
 	}
 
+	trainingMetrics := computeClassificationMetricsParallel(trainingRecords, weights, workers)
+	testMetrics := computeClassificationMetricsParallel(testRecords, weights, workers)
+	totalRows := len(trainingRecords) + len(testRecords)
 	return LogisticModel{
-		ModelType:    "logistic_regression",
-		Target:       "HighConsumption",
-		Features:     logisticFeatureNames,
-		Weights:      weights,
-		LearningRate: logisticLearningRate,
-		Epochs:       logisticEpochs,
-		Workers:      workers,
-		Rows:         len(records),
-		Threshold:    highConsumptionThreshold,
-		Accuracy:     computeAccuracy(records, weights, workers),
-		Loss:         loss,
+		ModelType:         "logistic_regression",
+		Target:            "HighConsumption",
+		Features:          logisticFeatureNames,
+		Weights:           weights,
+		LearningRate:      logisticLearningRate,
+		Epochs:            logisticEpochs,
+		Workers:           workers,
+		Rows:              totalRows,
+		TrainRows:         len(trainingRecords),
+		TestRows:          len(testRecords),
+		TrainRatio:        safeRatio(len(trainingRecords), totalRows),
+		SplitStrategy:     "temporal_80_20",
+		Threshold:         highConsumptionThreshold,
+		DecisionThreshold: modelDecisionThreshold,
+		Accuracy:          testMetrics.Accuracy,
+		Loss:              testMetrics.Loss,
+		TrainingMetrics:   trainingMetrics,
+		TestMetrics:       testMetrics,
 	}
 }
 
@@ -135,9 +176,9 @@ func computeGradient(records []PowerConsumption, weights []float64) logisticGrad
 	}
 }
 
-func computeAccuracy(records []PowerConsumption, weights []float64, workers int) float64 {
+func computeClassificationMetricsParallel(records []PowerConsumption, weights []float64, workers int) ClassificationMetrics {
 	if len(records) == 0 {
-		return 0
+		return ClassificationMetrics{}
 	}
 	if workers <= 0 {
 		workers = 1
@@ -146,24 +187,34 @@ func computeAccuracy(records []PowerConsumption, weights []float64, workers int)
 		workers = len(records)
 	}
 
-	results := make(chan int, workers)
+	results := make(chan classificationCounts, workers)
 	var wg sync.WaitGroup
 	for _, job := range buildIndexJobs(len(records), workers) {
 		wg.Add(1)
 		go func(start, end int) {
 			defer wg.Done()
-			correct := 0
+			var counts classificationCounts
 			for _, record := range records[start:end] {
 				prediction := sigmoid(dot(weights, featureVector(record)))
 				label := 0
-				if prediction >= 0.5 {
+				if prediction >= modelDecisionThreshold {
 					label = 1
 				}
-				if label == record.HighConsumption {
-					correct++
+				switch {
+				case label == 1 && record.HighConsumption == 1:
+					counts.TruePositive++
+				case label == 0 && record.HighConsumption == 0:
+					counts.TrueNegative++
+				case label == 1 && record.HighConsumption == 0:
+					counts.FalsePositive++
+				case label == 0 && record.HighConsumption == 1:
+					counts.FalseNegative++
 				}
+				counts.Loss += logisticLoss(float64(record.HighConsumption), prediction)
+				counts.Count++
+				counts.Positive += record.HighConsumption
 			}
-			results <- correct
+			results <- counts
 		}(job.Start, job.End)
 	}
 
@@ -172,11 +223,49 @@ func computeAccuracy(records []PowerConsumption, weights []float64, workers int)
 		close(results)
 	}()
 
-	correct := 0
-	for value := range results {
-		correct += value
+	var total classificationCounts
+	for result := range results {
+		total.TruePositive += result.TruePositive
+		total.TrueNegative += result.TrueNegative
+		total.FalsePositive += result.FalsePositive
+		total.FalseNegative += result.FalseNegative
+		total.Loss += result.Loss
+		total.Count += result.Count
+		total.Positive += result.Positive
 	}
-	return float64(correct) / float64(len(records))
+
+	precision := safeRatio(total.TruePositive, total.TruePositive+total.FalsePositive)
+	recall := safeRatio(total.TruePositive, total.TruePositive+total.FalseNegative)
+	specificity := safeRatio(total.TrueNegative, total.TrueNegative+total.FalsePositive)
+	return ClassificationMetrics{
+		Rows:             total.Count,
+		TruePositive:     total.TruePositive,
+		TrueNegative:     total.TrueNegative,
+		FalsePositive:    total.FalsePositive,
+		FalseNegative:    total.FalseNegative,
+		Accuracy:         safeRatio(total.TruePositive+total.TrueNegative, total.Count),
+		Precision:        precision,
+		Recall:           recall,
+		Specificity:      specificity,
+		F1Score:          safeFloatRatio(2*precision*recall, precision+recall),
+		BalancedAccuracy: (recall + specificity) / 2,
+		PositiveRate:     safeRatio(total.Positive, total.Count),
+		Loss:             safeFloatRatio(total.Loss, float64(total.Count)),
+	}
+}
+
+func safeRatio(numerator, denominator int) float64 {
+	if denominator == 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func safeFloatRatio(numerator, denominator float64) float64 {
+	if denominator == 0 {
+		return 0
+	}
+	return numerator / denominator
 }
 
 func featureVector(record PowerConsumption) []float64 {

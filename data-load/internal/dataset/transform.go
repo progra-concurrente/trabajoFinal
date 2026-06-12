@@ -23,6 +23,7 @@ func transformRecord(record ParsedPowerConsumption) PowerConsumption {
 		SubMeteringTotal:    subMeteringTotal,
 		Hour:                record.Timestamp.Hour(),
 		DayOfWeek:           int(record.Timestamp.Weekday()),
+		DayOfMonth:          record.Timestamp.Day(),
 		Month:               int(record.Timestamp.Month()),
 		HighConsumption:     highConsumption,
 		OtherConsumption:    otherConsumption,

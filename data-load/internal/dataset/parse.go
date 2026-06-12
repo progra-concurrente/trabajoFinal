@@ -13,7 +13,7 @@ func parseLine(line string) (ParsedPowerConsumption, error) {
 		return ParsedPowerConsumption{}, fmt.Errorf("expected 9 fields, got %d", len(parts))
 	}
 
-	timestamp, err := time.Parse("02/01/2006 15:04:05", parts[0]+" "+parts[1])
+	timestamp, err := time.Parse("2/1/2006 15:04:05", parts[0]+" "+parts[1])
 	if err != nil {
 		return ParsedPowerConsumption{}, err
 	}
