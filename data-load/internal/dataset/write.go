@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	sharedml "powersight/pkg/ml"
 )
 
 func saveToCSV(filePath string, data []PowerConsumption) error {
@@ -40,6 +42,32 @@ func saveToCSV(filePath string, data []PowerConsumption) error {
 		)
 		_, err := writer.WriteString(line)
 		if err != nil {
+			return err
+		}
+	}
+	return writer.Flush()
+}
+
+func saveForecastCSV(filePath string, data []sharedml.Record) error {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	_, err = writer.WriteString("Index,CurrentActivePower,RecentAverageActivePower,RecentMaximumActivePower,RecentStdDevActivePower,RecentActivePowerTrend,CurrentReactivePower,CurrentVoltage,CurrentIntensity,CurrentSubMeteringTotal,CurrentOtherConsumption,Hour,DayOfWeek,Month,HistoricalHourHighRate,HistoricalDayHourHighRate,FutureHighConsumption\n")
+	if err != nil {
+		return err
+	}
+	for index, record := range data {
+		f := record.ForecastFeatures
+		line := fmt.Sprintf("%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%d\n",
+			index, f.CurrentActivePower, f.RecentAverageActivePower, f.RecentMaximumActivePower,
+			f.RecentStdDevActivePower, f.RecentActivePowerTrend, f.CurrentReactivePower,
+			f.CurrentVoltage, f.CurrentIntensity, f.CurrentSubMeteringTotal, f.CurrentOtherConsumption,
+			f.Hour, f.DayOfWeek, f.Month, f.HistoricalHourHighRate, f.HistoricalDayHourHighRate,
+			record.FutureHighConsumption)
+		if _, err := writer.WriteString(line); err != nil {
 			return err
 		}
 	}

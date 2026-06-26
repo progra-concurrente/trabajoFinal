@@ -91,17 +91,8 @@ func LoadData(root string, workers, total, chunkSize int) {
 		fmt.Printf("Error saving to CSV: %v\n", err)
 		return
 	}
-	trainingData, testData := splitTrainTest(cleanData, modelTrainRatio)
-	if err := saveToCSV(filepath.Join(outputDir, "training_data.csv"), trainingData); err != nil {
-		fmt.Printf("Error saving training dataset: %v\n", err)
-		return
-	}
-	if err := saveToCSV(filepath.Join(outputDir, "test_data.csv"), testData); err != nil {
-		fmt.Printf("Error saving test dataset: %v\n", err)
-		return
-	}
 	stageDurations = append(stageDurations, stageDuration{
-		Name:     "Escritura de datasets limpio/train/test",
+		Name:     "Escritura del dataset limpio",
 		Duration: time.Since(stageStart),
 	})
 
@@ -148,14 +139,29 @@ func LoadData(root string, workers, total, chunkSize int) {
 	})
 
 	stageStart = time.Now()
-	model := trainLogisticModel(trainingData, testData, workers)
+	forecastRecords := buildForecastRecords(cleanData, workers)
+	forecastTraining, forecastTest := splitForecastTrainTest(forecastRecords, modelTrainRatio)
+	if err := saveForecastCSV(filepath.Join(outputDir, "forecast_training.csv"), forecastTraining); err != nil {
+		fmt.Printf("Error saving forecast training dataset: %v\n", err)
+		return
+	}
+	if err := saveForecastCSV(filepath.Join(outputDir, "forecast_test.csv"), forecastTest); err != nil {
+		fmt.Printf("Error saving forecast test dataset: %v\n", err)
+		return
+	}
 	stageDurations = append(stageDurations, stageDuration{
-		Name:     "Entrenamiento y evaluacion ML paralelos",
+		Name: "Construccion concurrente de ventanas futuras", Duration: time.Since(stageStart),
+	})
+
+	stageStart = time.Now()
+	model := trainForecastModel(forecastTraining, forecastTest, workers)
+	stageDurations = append(stageDurations, stageDuration{
+		Name:     "Entrenamiento predictivo y evaluacion paralelos",
 		Duration: time.Since(stageStart),
 	})
 
 	stageStart = time.Now()
-	modelFile := filepath.Join(outputDir, "logistic_model.json")
+	modelFile := filepath.Join(outputDir, "forecast_model.json")
 	if err := saveModelJSON(modelFile, model); err != nil {
 		fmt.Printf("Error saving ML model: %v\n", err)
 		return
@@ -171,6 +177,7 @@ func LoadData(root string, workers, total, chunkSize int) {
 	fmt.Printf("Rows dropped by invalid values: %d\n", stats.DroppedInvalid)
 	fmt.Printf("ML model: %s\n", model.ModelType)
 	fmt.Printf("ML parallel workers: %d\n", model.Workers)
+	fmt.Printf("ML objective: forecast sustained high consumption in the next %d minutes\n", model.HorizonMinutes)
 	fmt.Printf("ML split: %s (train=%d, test=%d)\n", model.SplitStrategy, model.TrainRows, model.TestRows)
 	printClassificationMetrics("Training metrics", model.TrainingMetrics)
 	printClassificationMetrics("Test metrics", model.TestMetrics)

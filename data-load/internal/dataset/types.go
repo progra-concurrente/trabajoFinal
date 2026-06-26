@@ -19,6 +19,7 @@ type ParsedPowerConsumption struct {
 }
 
 type PowerConsumption struct {
+	Timestamp           time.Time
 	Date                string
 	Time                string
 	GlobalActivePower   float64
@@ -52,6 +53,9 @@ type LogisticModel struct {
 	SplitStrategy     string                `json:"split_strategy"`
 	Threshold         float64               `json:"high_consumption_threshold"`
 	DecisionThreshold float64               `json:"decision_threshold"`
+	HistoryMinutes    int                   `json:"history_minutes"`
+	HorizonMinutes    int                   `json:"horizon_minutes"`
+	SustainedMinutes  int                   `json:"sustained_minutes"`
 	Accuracy          float64               `json:"accuracy"`
 	Loss              float64               `json:"loss"`
 	TrainingMetrics   ClassificationMetrics `json:"training_metrics"`
@@ -114,15 +118,19 @@ type ReportCombinedPeak struct {
 }
 
 type SustainabilityReport struct {
-	BusinessMission   string               `json:"business_mission"`
-	Objective         string               `json:"objective"`
-	Target            string               `json:"target"`
-	Threshold         float64              `json:"threshold"`
-	AnalysisCriteria  AnalysisCriteria     `json:"analysis_criteria"`
-	PeakHours         []ReportDemandPeak   `json:"peak_hours"`
-	PeakDayHours      []ReportCombinedPeak `json:"peak_day_hours"`
-	PeakCalendarDates []ReportDemandPeak   `json:"peak_calendar_dates"`
-	Recommendations   []string             `json:"recommendations"`
+	BusinessMission   string                    `json:"business_mission"`
+	Objective         string                    `json:"objective"`
+	Target            string                    `json:"target"`
+	Threshold         float64                   `json:"threshold"`
+	AnalysisCriteria  AnalysisCriteria          `json:"analysis_criteria"`
+	PeakHours         []ReportDemandPeak        `json:"peak_hours"`
+	PeakDayHours      []ReportCombinedPeak      `json:"peak_day_hours"`
+	PeakCalendarDates []ReportDemandPeak        `json:"peak_calendar_dates"`
+	HourlyPatterns    []DemandAggregate         `json:"hourly_patterns"`
+	DailyPatterns     []DemandAggregate         `json:"daily_patterns"`
+	MonthlyPatterns   []DemandAggregate         `json:"monthly_patterns"`
+	DayHourPatterns   []CombinedDemandAggregate `json:"day_hour_patterns"`
+	Recommendations   []string                  `json:"recommendations"`
 }
 
 type LoadStats struct {

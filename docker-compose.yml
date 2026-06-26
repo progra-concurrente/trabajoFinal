@@ -1,0 +1,109 @@
+x-worker-environment: &worker-environment
+  COORDINATOR_TCP_ADDR: "api:9000"
+  TRAINING_DATA_PATH: "/app/data/forecast_training.csv"
+  NODE_CAPACITY: "4"
+  RECONNECT_INTERVAL: "2s"
+
+x-worker-volumes: &worker-volumes
+  - ./data/processed/forecast_training.csv:/app/data/forecast_training.csv:ro
+
+services:
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - powersight-mongodb:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - powersight-redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      args:
+        TARGET: api
+    environment:
+      HTTP_ADDR: ":8080"
+      CLUSTER_TCP_ADDR: ":9000"
+      MONGO_URI: "mongodb://mongodb:27017"
+      MONGO_DATABASE: "powersight"
+      REDIS_ADDR: "redis:6379"
+      MODEL_PATH: "/app/data/processed/forecast_model.json"
+      SUSTAINABILITY_REPORT_PATH: "/app/data/processed/sustainability_report.json"
+      OPENAPI_PATH: "/app/docs/openapi.yaml"
+      APP_TIMEZONE: "America/Lima"
+      JWT_SECRET: "powersight-development-secret-change-in-production"
+      API_USERNAME: "admin"
+      API_PASSWORD: "powersight"
+      JWT_TTL: "8h"
+      NODE_REQUEST_TIMEOUT: "2m"
+      HEARTBEAT_INTERVAL: "3s"
+      MISSED_HEARTBEATS: "3"
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    volumes:
+      - ./data/processed/forecast_model.json:/app/data/processed/forecast_model.json:ro
+      - ./data/processed/sustainability_report.json:/app/data/processed/sustainability_report.json:ro
+      - ./docs/openapi.yaml:/app/docs/openapi.yaml:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  ml-node-1:
+    build:
+      context: .
+      args:
+        TARGET: ml-node
+    environment:
+      <<: *worker-environment
+      NODE_ID: "ml-node-1"
+    volumes: *worker-volumes
+    depends_on:
+      - api
+
+  ml-node-2:
+    build:
+      context: .
+      args:
+        TARGET: ml-node
+    environment:
+      <<: *worker-environment
+      NODE_ID: "ml-node-2"
+    volumes: *worker-volumes
+    depends_on:
+      - api
+
+  ml-node-3:
+    build:
+      context: .
+      args:
+        TARGET: ml-node
+    environment:
+      <<: *worker-environment
+      NODE_ID: "ml-node-3"
+    volumes: *worker-volumes
+    depends_on:
+      - api
+
+volumes:
+  powersight-mongodb:
+  powersight-redis:
