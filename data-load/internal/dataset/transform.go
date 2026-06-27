@@ -11,6 +11,7 @@ func transformRecord(record ParsedPowerConsumption) PowerConsumption {
 	otherConsumption := activeEnergyPerMinute - subMeteringTotal
 
 	return PowerConsumption{
+		Timestamp:           record.Timestamp,
 		Date:                record.Date,
 		Time:                record.Time,
 		GlobalActivePower:   record.GlobalActivePower,

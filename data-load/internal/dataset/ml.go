@@ -3,6 +3,8 @@ package dataset
 import (
 	"math"
 	"sync"
+
+	sharedml "powersight/pkg/ml"
 )
 
 const (
@@ -12,255 +14,168 @@ const (
 	modelDecisionThreshold = 0.50
 )
 
-var logisticFeatureNames = []string{
-	"GlobalReactivePower",
-	"Voltage",
-	"GlobalIntensity",
-	"SubMeteringTotal",
-	"OtherConsumption",
-	"Hour",
-	"DayOfWeek",
-	"Month",
-}
-
-type logisticGradient struct {
-	Values []float64
-	Loss   float64
-	Count  int
-}
+var logisticFeatureNames = append([]string(nil), sharedml.FeatureNames...)
 
 type classificationCounts struct {
-	TruePositive  int
-	TrueNegative  int
-	FalsePositive int
-	FalseNegative int
-	Loss          float64
-	Count         int
-	Positive      int
+	truePositive, trueNegative, falsePositive, falseNegative int
+	loss                                                     float64
+	count, positive                                          int
 }
 
-func splitTrainTest(records []PowerConsumption, trainRatio float64) ([]PowerConsumption, []PowerConsumption) {
-	if len(records) == 0 {
-		return nil, nil
+func splitForecastTrainTest(records []sharedml.Record, trainRatio float64) ([]sharedml.Record, []sharedml.Record) {
+	if len(records) < 2 {
+		return records, nil
 	}
 	if trainRatio <= 0 || trainRatio >= 1 {
 		trainRatio = modelTrainRatio
 	}
-
-	splitIndex := int(float64(len(records)) * trainRatio)
-	if splitIndex < 1 {
-		splitIndex = 1
+	index := int(float64(len(records)) * trainRatio)
+	if index < 1 {
+		index = 1
 	}
-	if splitIndex >= len(records) {
-		splitIndex = len(records) - 1
+	if index >= len(records) {
+		index = len(records) - 1
 	}
-	return records[:splitIndex], records[splitIndex:]
+	return records[:index], records[index:]
 }
 
-func trainLogisticModel(trainingRecords, testRecords []PowerConsumption, workers int) LogisticModel {
-	if workers <= 0 {
+func trainForecastModel(training, test []sharedml.Record, workers int) LogisticModel {
+	if workers < 1 {
 		workers = 1
 	}
-	if len(trainingRecords) == 0 {
-		return LogisticModel{
-			ModelType:         "logistic_regression",
-			Target:            "HighConsumption",
-			Features:          logisticFeatureNames,
-			Weights:           make([]float64, len(logisticFeatureNames)+1),
-			LearningRate:      logisticLearningRate,
-			Epochs:            logisticEpochs,
-			Workers:           workers,
-			Threshold:         highConsumptionThreshold,
-			DecisionThreshold: modelDecisionThreshold,
-			TrainRatio:        modelTrainRatio,
-			SplitStrategy:     "temporal_80_20",
-		}
-	}
-
 	weights := make([]float64, len(logisticFeatureNames)+1)
 	for epoch := 0; epoch < logisticEpochs; epoch++ {
-		gradient, _ := computeGradientParallel(trainingRecords, weights, workers)
-		for i := range weights {
-			weights[i] -= logisticLearningRate * gradient[i]
+		partials := computeGradientsParallel(training, weights, workers)
+		gradient, err := sharedml.AggregateGradients(partials, len(weights))
+		if err != nil {
+			break
 		}
+		weights = sharedml.ApplyGradient(weights, gradient, logisticLearningRate)
 	}
-
-	trainingMetrics := computeClassificationMetricsParallel(trainingRecords, weights, workers)
-	testMetrics := computeClassificationMetricsParallel(testRecords, weights, workers)
-	totalRows := len(trainingRecords) + len(testRecords)
+	decisionThreshold := chooseDecisionThreshold(training, weights, workers)
+	trainingMetrics := computeForecastMetricsParallel(training, weights, workers, decisionThreshold)
+	testMetrics := computeForecastMetricsParallel(test, weights, workers, decisionThreshold)
+	total := len(training) + len(test)
 	return LogisticModel{
-		ModelType:         "logistic_regression",
-		Target:            "HighConsumption",
-		Features:          logisticFeatureNames,
-		Weights:           weights,
-		LearningRate:      logisticLearningRate,
-		Epochs:            logisticEpochs,
-		Workers:           workers,
-		Rows:              totalRows,
-		TrainRows:         len(trainingRecords),
-		TestRows:          len(testRecords),
-		TrainRatio:        safeRatio(len(trainingRecords), totalRows),
-		SplitStrategy:     "temporal_80_20",
-		Threshold:         highConsumptionThreshold,
-		DecisionThreshold: modelDecisionThreshold,
-		Accuracy:          testMetrics.Accuracy,
-		Loss:              testMetrics.Loss,
-		TrainingMetrics:   trainingMetrics,
-		TestMetrics:       testMetrics,
+		ModelType: "logistic_regression", Target: "FutureSustainedHighConsumption30m",
+		Features: logisticFeatureNames, Weights: weights,
+		LearningRate: logisticLearningRate, Epochs: logisticEpochs, Workers: workers,
+		Rows: total, TrainRows: len(training), TestRows: len(test),
+		TrainRatio: safeRatio(len(training), total), SplitStrategy: "temporal_80_20",
+		Threshold: highConsumptionThreshold, DecisionThreshold: decisionThreshold,
+		HistoryMinutes: forecastHistoryMinutes, HorizonMinutes: forecastHorizonMinutes,
+		SustainedMinutes: forecastSustainedMinutes,
+		Accuracy:         testMetrics.Accuracy, Loss: testMetrics.Loss,
+		TrainingMetrics: trainingMetrics, TestMetrics: testMetrics,
 	}
 }
 
-func computeGradientParallel(records []PowerConsumption, weights []float64, workers int) ([]float64, float64) {
-	if workers <= 0 {
-		workers = 1
+func computeGradientsParallel(records []sharedml.Record, weights []float64, workers int) []sharedml.Gradient {
+	if len(records) == 0 {
+		return nil
 	}
 	if workers > len(records) {
 		workers = len(records)
 	}
-
-	results := make(chan logisticGradient, workers)
+	results := make(chan sharedml.Gradient, workers)
 	var wg sync.WaitGroup
 	for _, job := range buildIndexJobs(len(records), workers) {
 		wg.Add(1)
 		go func(start, end int) {
 			defer wg.Done()
-			results <- computeGradient(records[start:end], weights)
+			results <- sharedml.ComputeGradient(records[start:end], weights)
 		}(job.Start, job.End)
 	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	gradient := make([]float64, len(weights))
-	loss := 0.0
-	total := 0
+	go func() { wg.Wait(); close(results) }()
+	partials := make([]sharedml.Gradient, 0, workers)
 	for result := range results {
-		for i, value := range result.Values {
-			gradient[i] += value
-		}
-		loss += result.Loss
-		total += result.Count
+		partials = append(partials, result)
 	}
-
-	if total == 0 {
-		return gradient, 0
-	}
-	for i := range gradient {
-		gradient[i] /= float64(total)
-	}
-	return gradient, loss / float64(total)
+	return partials
 }
 
-func computeGradient(records []PowerConsumption, weights []float64) logisticGradient {
-	gradient := make([]float64, len(weights))
-	loss := 0.0
-
-	for _, record := range records {
-		features := featureVector(record)
-		prediction := sigmoid(dot(weights, features))
-		label := float64(record.HighConsumption)
-		errorValue := prediction - label
-
-		for i := range gradient {
-			gradient[i] += errorValue * features[i]
+func chooseDecisionThreshold(records []sharedml.Record, weights []float64, workers int) float64 {
+	bestThreshold, bestF2 := modelDecisionThreshold, -1.0
+	for threshold := 0.20; threshold <= 0.70; threshold += 0.05 {
+		metrics := computeForecastMetricsParallel(records, weights, workers, threshold)
+		f2 := safeFloatRatio(5*metrics.Precision*metrics.Recall, 4*metrics.Precision+metrics.Recall)
+		if f2 > bestF2 {
+			bestThreshold, bestF2 = threshold, f2
 		}
-		loss += logisticLoss(label, prediction)
 	}
-
-	return logisticGradient{
-		Values: gradient,
-		Loss:   loss,
-		Count:  len(records),
-	}
+	return bestThreshold
 }
 
-func computeClassificationMetricsParallel(records []PowerConsumption, weights []float64, workers int) ClassificationMetrics {
+func computeForecastMetricsParallel(records []sharedml.Record, weights []float64, workers int, threshold float64) ClassificationMetrics {
 	if len(records) == 0 {
 		return ClassificationMetrics{}
-	}
-	if workers <= 0 {
-		workers = 1
 	}
 	if workers > len(records) {
 		workers = len(records)
 	}
-
 	results := make(chan classificationCounts, workers)
 	var wg sync.WaitGroup
+	model := sharedml.Model{Weights: weights, DecisionThreshold: threshold}
 	for _, job := range buildIndexJobs(len(records), workers) {
 		wg.Add(1)
 		go func(start, end int) {
 			defer wg.Done()
 			var counts classificationCounts
 			for _, record := range records[start:end] {
-				prediction := sigmoid(dot(weights, featureVector(record)))
-				label := 0
-				if prediction >= modelDecisionThreshold {
-					label = 1
-				}
+				prediction, _ := sharedml.Predict(model, record.ForecastFeatures)
 				switch {
-				case label == 1 && record.HighConsumption == 1:
-					counts.TruePositive++
-				case label == 0 && record.HighConsumption == 0:
-					counts.TrueNegative++
-				case label == 1 && record.HighConsumption == 0:
-					counts.FalsePositive++
-				case label == 0 && record.HighConsumption == 1:
-					counts.FalseNegative++
+				case prediction.Class == 1 && record.FutureHighConsumption == 1:
+					counts.truePositive++
+				case prediction.Class == 0 && record.FutureHighConsumption == 0:
+					counts.trueNegative++
+				case prediction.Class == 1 && record.FutureHighConsumption == 0:
+					counts.falsePositive++
+				case prediction.Class == 0 && record.FutureHighConsumption == 1:
+					counts.falseNegative++
 				}
-				counts.Loss += logisticLoss(float64(record.HighConsumption), prediction)
-				counts.Count++
-				counts.Positive += record.HighConsumption
+				counts.loss += logisticLoss(float64(record.FutureHighConsumption), prediction.Probability)
+				counts.count++
+				counts.positive += record.FutureHighConsumption
 			}
 			results <- counts
 		}(job.Start, job.End)
 	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
+	go func() { wg.Wait(); close(results) }()
 	var total classificationCounts
-	for result := range results {
-		total.TruePositive += result.TruePositive
-		total.TrueNegative += result.TrueNegative
-		total.FalsePositive += result.FalsePositive
-		total.FalseNegative += result.FalseNegative
-		total.Loss += result.Loss
-		total.Count += result.Count
-		total.Positive += result.Positive
+	for current := range results {
+		total.truePositive += current.truePositive
+		total.trueNegative += current.trueNegative
+		total.falsePositive += current.falsePositive
+		total.falseNegative += current.falseNegative
+		total.loss += current.loss
+		total.count += current.count
+		total.positive += current.positive
 	}
-
-	precision := safeRatio(total.TruePositive, total.TruePositive+total.FalsePositive)
-	recall := safeRatio(total.TruePositive, total.TruePositive+total.FalseNegative)
-	specificity := safeRatio(total.TrueNegative, total.TrueNegative+total.FalsePositive)
+	precision := safeRatio(total.truePositive, total.truePositive+total.falsePositive)
+	recall := safeRatio(total.truePositive, total.truePositive+total.falseNegative)
+	specificity := safeRatio(total.trueNegative, total.trueNegative+total.falsePositive)
 	return ClassificationMetrics{
-		Rows:             total.Count,
-		TruePositive:     total.TruePositive,
-		TrueNegative:     total.TrueNegative,
-		FalsePositive:    total.FalsePositive,
-		FalseNegative:    total.FalseNegative,
-		Accuracy:         safeRatio(total.TruePositive+total.TrueNegative, total.Count),
-		Precision:        precision,
-		Recall:           recall,
-		Specificity:      specificity,
+		Rows: total.count, TruePositive: total.truePositive, TrueNegative: total.trueNegative,
+		FalsePositive: total.falsePositive, FalseNegative: total.falseNegative,
+		Accuracy:  safeRatio(total.truePositive+total.trueNegative, total.count),
+		Precision: precision, Recall: recall, Specificity: specificity,
 		F1Score:          safeFloatRatio(2*precision*recall, precision+recall),
-		BalancedAccuracy: (recall + specificity) / 2,
-		PositiveRate:     safeRatio(total.Positive, total.Count),
-		Loss:             safeFloatRatio(total.Loss, float64(total.Count)),
+		BalancedAccuracy: (recall + specificity) / 2, PositiveRate: safeRatio(total.positive, total.count),
+		Loss: safeFloatRatio(total.loss, float64(total.count)),
 	}
 }
 
+func logisticLoss(label, prediction float64) float64 {
+	const epsilon = 1e-12
+	prediction = math.Max(epsilon, math.Min(1-epsilon, prediction))
+	return -(label*math.Log(prediction) + (1-label)*math.Log(1-prediction))
+}
 func safeRatio(numerator, denominator int) float64 {
 	if denominator == 0 {
 		return 0
 	}
 	return float64(numerator) / float64(denominator)
 }
-
 func safeFloatRatio(numerator, denominator float64) float64 {
 	if denominator == 0 {
 		return 0
@@ -268,66 +183,23 @@ func safeFloatRatio(numerator, denominator float64) float64 {
 	return numerator / denominator
 }
 
-func featureVector(record PowerConsumption) []float64 {
-	return []float64{
-		1,
-		record.GlobalReactivePower,
-		record.Voltage / 250,
-		record.GlobalIntensity / 25,
-		record.SubMeteringTotal / 50,
-		record.OtherConsumption / 50,
-		float64(record.Hour) / 23,
-		float64(record.DayOfWeek) / 6,
-		float64(record.Month) / 12,
-	}
-}
-
-func dot(weights, features []float64) float64 {
-	total := 0.0
-	for i := range weights {
-		total += weights[i] * features[i]
-	}
-	return total
-}
-
-func sigmoid(value float64) float64 {
-	if value >= 0 {
-		z := math.Exp(-value)
-		return 1 / (1 + z)
-	}
-	z := math.Exp(value)
-	return z / (1 + z)
-}
-
-func logisticLoss(label, prediction float64) float64 {
-	epsilon := 1e-12
-	prediction = math.Max(epsilon, math.Min(1-epsilon, prediction))
-	return -(label*math.Log(prediction) + (1-label)*math.Log(1-prediction))
-}
-
-type indexRange struct {
-	Start int
-	End   int
-}
+type indexRange struct{ Start, End int }
 
 func buildIndexJobs(length, workers int) []indexRange {
-	if workers <= 0 {
+	if workers < 1 {
 		workers = 1
 	}
 	if workers > length {
 		workers = length
 	}
-
-	blockSize := length / workers
-	remainder := length % workers
+	block, remainder, start := length/workers, length%workers, 0
 	jobs := make([]indexRange, 0, workers)
-	start := 0
-	for i := 0; i < workers; i++ {
-		end := start + blockSize
-		if i < remainder {
+	for index := 0; index < workers; index++ {
+		end := start + block
+		if index < remainder {
 			end++
 		}
-		jobs = append(jobs, indexRange{Start: start, End: end})
+		jobs = append(jobs, indexRange{start, end})
 		start = end
 	}
 	return jobs

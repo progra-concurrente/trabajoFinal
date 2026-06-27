@@ -1,0 +1,144 @@
+openapi: 3.0.3
+info:
+  title: PowerSight Preventive Energy API
+  version: 3.0.0
+  description: Diagnóstico actual y pronóstico distribuido de consumo alto sostenido para los próximos 30 minutos.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/auth/login:
+    post:
+      summary: Obtener JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, example: admin}
+                password: {type: string, example: powersight}
+      responses:
+        "200": {description: Token creado}
+  /api/v1/forecasts:
+    post:
+      summary: Pronosticar consumo alto sostenido durante los próximos 30 minutos
+      description: Requiere exactamente 15 lecturas ordenadas, separadas por un minuto.
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ForecastRequest"}
+            example:
+              readings:
+                - {observed_at: "2026-06-25T20:46:00-05:00", global_active_power: 0.82, global_reactive_power: 0.12, voltage: 239.8, global_intensity: 3.5, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 2}
+                - {observed_at: "2026-06-25T20:47:00-05:00", global_active_power: 0.86, global_reactive_power: 0.12, voltage: 239.5, global_intensity: 3.7, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 2}
+                - {observed_at: "2026-06-25T20:48:00-05:00", global_active_power: 0.91, global_reactive_power: 0.13, voltage: 239.2, global_intensity: 3.9, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 2}
+                - {observed_at: "2026-06-25T20:49:00-05:00", global_active_power: 0.95, global_reactive_power: 0.13, voltage: 239.0, global_intensity: 4.1, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 3}
+                - {observed_at: "2026-06-25T20:50:00-05:00", global_active_power: 1.00, global_reactive_power: 0.14, voltage: 238.8, global_intensity: 4.3, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 3}
+                - {observed_at: "2026-06-25T20:51:00-05:00", global_active_power: 1.04, global_reactive_power: 0.14, voltage: 238.6, global_intensity: 4.5, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 3}
+                - {observed_at: "2026-06-25T20:52:00-05:00", global_active_power: 1.08, global_reactive_power: 0.15, voltage: 238.4, global_intensity: 4.7, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 3}
+                - {observed_at: "2026-06-25T20:53:00-05:00", global_active_power: 1.12, global_reactive_power: 0.15, voltage: 238.2, global_intensity: 4.9, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 4}
+                - {observed_at: "2026-06-25T20:54:00-05:00", global_active_power: 1.16, global_reactive_power: 0.16, voltage: 238.0, global_intensity: 5.1, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 4}
+                - {observed_at: "2026-06-25T20:55:00-05:00", global_active_power: 1.20, global_reactive_power: 0.16, voltage: 237.8, global_intensity: 5.3, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 4}
+                - {observed_at: "2026-06-25T20:56:00-05:00", global_active_power: 1.24, global_reactive_power: 0.17, voltage: 237.6, global_intensity: 5.5, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 4}
+                - {observed_at: "2026-06-25T20:57:00-05:00", global_active_power: 1.28, global_reactive_power: 0.17, voltage: 237.4, global_intensity: 5.7, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 5}
+                - {observed_at: "2026-06-25T20:58:00-05:00", global_active_power: 1.32, global_reactive_power: 0.18, voltage: 237.2, global_intensity: 5.9, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 5}
+                - {observed_at: "2026-06-25T20:59:00-05:00", global_active_power: 1.36, global_reactive_power: 0.18, voltage: 237.0, global_intensity: 6.1, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 5}
+                - {observed_at: "2026-06-25T21:00:00-05:00", global_active_power: 1.40, global_reactive_power: 0.19, voltage: 236.8, global_intensity: 6.3, sub_metering_1: 0, sub_metering_2: 1, sub_metering_3: 5}
+      responses:
+        "200":
+          description: Diagnóstico y pronóstico preventivo
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ForecastResponse"}
+    get:
+      summary: Historial de pronósticos del usuario
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Historial}
+  /api/v1/forecasts/{id}:
+    get:
+      summary: Consultar un pronóstico
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: Pronóstico}
+  /api/v1/trainings:
+    post:
+      summary: Iniciar entrenamiento distribuido
+      security: [{bearerAuth: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                epochs: {type: integer, default: 80}
+                learning_rate: {type: number, default: 0.25}
+      responses:
+        "202": {description: Entrenamiento iniciado}
+    get:
+      summary: Listar entrenamientos
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Entrenamientos}
+  /api/v1/cluster/nodes:
+    get:
+      summary: Estado del cluster ML
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Nodos}
+  /api/v1/reports/sustainability:
+    get:
+      summary: Patrones históricos por hora, día, mes y día-hora
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Reporte}
+  /health:
+    get:
+      summary: Salud de MongoDB, Redis y cluster
+      responses:
+        "200": {description: Sistema saludable}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+  schemas:
+    Reading:
+      type: object
+      required: [observed_at, global_active_power, global_reactive_power, voltage, global_intensity, sub_metering_1, sub_metering_2, sub_metering_3]
+      properties:
+        observed_at: {type: string, format: date-time}
+        global_active_power: {type: number}
+        global_reactive_power: {type: number}
+        voltage: {type: number}
+        global_intensity: {type: number}
+        sub_metering_1: {type: number}
+        sub_metering_2: {type: number}
+        sub_metering_3: {type: number}
+    ForecastRequest:
+      type: object
+      required: [readings]
+      properties:
+        readings:
+          type: array
+          minItems: 15
+          maxItems: 15
+          items: {$ref: "#/components/schemas/Reading"}
+    ForecastResponse:
+      type: object
+      properties:
+        current_status: {type: object}
+        horizon_minutes: {type: integer, example: 30}
+        expected_window_start: {type: string, format: date-time}
+        expected_window_end: {type: string, format: date-time}
+        probability: {type: number}
+        risk_level: {type: string, enum: [bajo, moderado, alto]}
+        context: {type: object}
+        recommendation: {type: object}
+        node_id: {type: string}
+        processing_time_ms: {type: number}
+        target_met: {type: boolean}

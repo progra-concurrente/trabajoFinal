@@ -1,0 +1,10 @@
+.git
+qa_final
+qa_original
+report_assets
+notebooks
+*.docx
+*.pdf
+data/raw
+data/processed
+data-load/benchmarks

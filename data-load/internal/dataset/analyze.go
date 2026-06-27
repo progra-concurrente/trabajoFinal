@@ -85,9 +85,9 @@ func analyzeDemand(records []PowerConsumption) demandAnalysis {
 
 func buildSustainabilityReportFromAnalysis(analysis demandAnalysis) SustainabilityReport {
 	return SustainabilityReport{
-		BusinessMission: "Promover eficiencia energetica domestica detectando patrones de alto consumo electrico.",
-		Objective:       "Identificar cuando ocurre el alto consumo para orientar alertas y recomendaciones de ahorro.",
-		Target:          "HighConsumption",
+		BusinessMission: "Ayudar a los hogares a prevenir periodos de alto consumo y reducir desperdicios electricos.",
+		Objective:       "Combinar patrones historicos con un pronostico de alto consumo sostenido para los proximos 30 minutos.",
+		Target:          "FutureSustainedHighConsumption30m",
 		Threshold:       highConsumptionThreshold,
 		AnalysisCriteria: AnalysisCriteria{
 			MinimumDayHourRecords:      minimumDayHourRecords,
@@ -102,10 +102,14 @@ func buildSustainabilityReportFromAnalysis(analysis demandAnalysis) Sustainabili
 		PeakCalendarDates: reportDemandPeaks(
 			topAggregatesWithMinimum(analysis.CalendarDate, minimumCalendarDateRecords, 5),
 		),
+		HourlyPatterns:  analysis.Hourly,
+		DailyPatterns:   analysis.Daily,
+		MonthlyPatterns: analysis.Monthly,
+		DayHourPatterns: analysis.DayHour,
 		Recommendations: []string{
 			"Priorizar alertas en las combinaciones de dia y hora con mayor tasa de alto consumo.",
 			"Reforzar recomendaciones en las fechas de calendario que repiten picos entre anos.",
-			"Usar la deteccion de HighConsumption como alerta para promover eficiencia energetica.",
+			"Combinar el riesgo historico con el pronostico de los proximos 30 minutos.",
 		},
 	}
 }
