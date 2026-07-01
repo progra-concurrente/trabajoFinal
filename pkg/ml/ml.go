@@ -65,7 +65,33 @@ type Model struct {
 	HistoryMinutes    int             `json:"history_minutes"`
 	HorizonMinutes    int             `json:"horizon_minutes"`
 	SustainedMinutes  int             `json:"sustained_minutes"`
+	Workers           int             `json:"workers,omitempty"`
+	Rows              int             `json:"rows,omitempty"`
+	TrainRows         int             `json:"train_rows,omitempty"`
+	TestRows          int             `json:"test_rows,omitempty"`
+	TrainRatio        float64         `json:"train_ratio,omitempty"`
+	SplitStrategy     string          `json:"split_strategy,omitempty"`
+	Accuracy          float64         `json:"accuracy,omitempty"`
+	Loss              float64         `json:"loss,omitempty"`
+	TrainingMetrics   Metrics         `json:"training_metrics,omitempty"`
+	TestMetrics       Metrics         `json:"test_metrics,omitempty"`
 	Metrics           json.RawMessage `json:"metrics,omitempty"`
+}
+
+type Metrics struct {
+	Rows             int     `json:"rows,omitempty"`
+	TruePositive     int     `json:"true_positive,omitempty"`
+	TrueNegative     int     `json:"true_negative,omitempty"`
+	FalsePositive    int     `json:"false_positive,omitempty"`
+	FalseNegative    int     `json:"false_negative,omitempty"`
+	Accuracy         float64 `json:"accuracy,omitempty"`
+	Precision        float64 `json:"precision,omitempty"`
+	Recall           float64 `json:"recall,omitempty"`
+	Specificity      float64 `json:"specificity,omitempty"`
+	F1Score          float64 `json:"f1_score,omitempty"`
+	BalancedAccuracy float64 `json:"balanced_accuracy,omitempty"`
+	PositiveRate     float64 `json:"positive_rate,omitempty"`
+	Loss             float64 `json:"loss,omitempty"`
 }
 
 // ComputeGradientConcurrent divides one node's shard among goroutines and

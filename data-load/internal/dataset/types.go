@@ -133,6 +133,25 @@ type SustainabilityReport struct {
 	Recommendations   []string                  `json:"recommendations"`
 }
 
+type PipelineMetrics struct {
+	GeneratedAt     time.Time             `json:"generated_at"`
+	Workers         int                   `json:"workers"`
+	RowsRead        int                   `json:"rows_read"`
+	RowsClean       int                   `json:"rows_clean"`
+	DroppedMissing  int                   `json:"dropped_missing"`
+	DroppedInvalid  int                   `json:"dropped_invalid"`
+	ForecastRows    int                   `json:"forecast_rows"`
+	TrainRows       int                   `json:"train_rows"`
+	TestRows        int                   `json:"test_rows"`
+	Stages          []PipelineStageMetric `json:"stages"`
+	TotalDurationMS float64               `json:"total_duration_ms"`
+}
+
+type PipelineStageMetric struct {
+	Name       string  `json:"name"`
+	DurationMS float64 `json:"duration_ms"`
+}
+
 type LoadStats struct {
 	LinesRead      int
 	RowsClean      int

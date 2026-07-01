@@ -21,6 +21,21 @@ paths:
                 password: {type: string, example: powersight}
       responses:
         "200": {description: Token creado}
+  /api/v1/auth/register:
+    post:
+      summary: Registrar usuario demo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, example: estudiante}
+                password: {type: string, example: powersight123}
+      responses:
+        "201": {description: Usuario creado y token emitido}
   /api/v1/forecasts:
     post:
       summary: Pronosticar consumo alto sostenido durante los próximos 30 minutos
@@ -98,6 +113,13 @@ paths:
       security: [{bearerAuth: []}]
       responses:
         "200": {description: Reporte}
+  /api/v1/admin/metrics:
+    get:
+      summary: Metricas administrativas del modelo, procesamiento y cluster
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Metricas consolidadas}
+        "403": {description: Requiere rol administrador}
   /health:
     get:
       summary: Salud de MongoDB, Redis y cluster
@@ -140,5 +162,9 @@ components:
         context: {type: object}
         recommendation: {type: object}
         node_id: {type: string}
+        cluster_latency_ms: {type: number}
         processing_time_ms: {type: number}
+        pipeline_timings: {type: object}
+        performance_target_ms: {type: number}
         target_met: {type: boolean}
+        cached: {type: boolean}
