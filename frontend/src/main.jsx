@@ -310,7 +310,7 @@ function AuthScreen({ onAuthenticated }) {
 
   return (
     <main className="auth-page">
-      <section className="auth-panel">
+      <section className="auth-shell">
         <div className="brand large">
           <span className="brand-mark"><FiZap /></span>
           <div>
@@ -319,8 +319,9 @@ function AuthScreen({ onAuthenticated }) {
           </div>
         </div>
         <div className="auth-copy">
+          <span className="eyebrow">Predicción distribuida</span>
           <h1>Decide antes de conectar otra carga</h1>
-          <p>Predicción distribuida de riesgo alto para los próximos 30 minutos, con historial y métricas del cluster.</p>
+          <p>PowerSight estima alertas de alto consumo después de autenticar el hogar, cargar su historial y procesar las lecturas recientes en el clúster.</p>
         </div>
         <form onSubmit={submit} className="auth-form">
           <div className="segmented">
