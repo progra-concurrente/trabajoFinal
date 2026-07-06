@@ -39,6 +39,14 @@ type TrainInitResult struct {
 	Rows int `json:"rows"`
 }
 
+type HeartbeatStatus struct {
+	ReceivedAt       int64   `json:"received_at"`
+	ActiveJobs       int     `json:"active_jobs"`
+	Capacity         int     `json:"capacity"`
+	CPUUsagePercent  float64 `json:"cpu_usage_percent"`
+	LoadedRecordRows int     `json:"loaded_record_rows"`
+}
+
 type TrainEpochPayload struct {
 	Start   int       `json:"start"`
 	End     int       `json:"end"`

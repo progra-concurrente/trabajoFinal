@@ -5,21 +5,32 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"golang.org/x/crypto/bcrypt"
 
 	"powersight/internal/cluster"
 	"powersight/pkg/ml"
 )
 
 var ErrNotFound = errors.New("record not found")
+var ErrInvalidCredentials = errors.New("invalid credentials")
 
 type Store struct {
 	client *mongo.Client
 	db     *mongo.Database
+}
+
+type User struct {
+	ID           string    `json:"id" bson:"_id"`
+	Username     string    `json:"username" bson:"username"`
+	PasswordHash string    `json:"-" bson:"password_hash"`
+	Role         string    `json:"role" bson:"role"`
+	CreatedAt    time.Time `json:"created_at" bson:"created_at"`
 }
 
 type Recommendation struct {
@@ -46,6 +57,14 @@ type CurrentStatus struct {
 	UnmeteredEnergyWh float64 `json:"unmetered_energy_wh" bson:"unmetered_energy_wh"`
 }
 
+type PipelineTimings struct {
+	ReceiveParseMS       float64 `json:"receive_parse_ms" bson:"receive_parse_ms"`
+	TransformFeaturesMS  float64 `json:"transform_features_ms" bson:"transform_features_ms"`
+	InferenceMS          float64 `json:"inference_ms" bson:"inference_ms"`
+	RecommendationMS     float64 `json:"recommendation_ms" bson:"recommendation_ms"`
+	PersistenceEnqueueMS float64 `json:"persistence_enqueue_ms" bson:"persistence_enqueue_ms"`
+}
+
 type ForecastRecord struct {
 	ID                  string              `json:"id" bson:"_id"`
 	UserID              string              `json:"user_id" bson:"user_id"`
@@ -66,6 +85,7 @@ type ForecastRecord struct {
 	ModelVersion        string              `json:"model_version" bson:"model_version"`
 	ClusterLatencyMS    float64             `json:"cluster_latency_ms" bson:"cluster_latency_ms"`
 	ProcessingTimeMS    float64             `json:"processing_time_ms" bson:"processing_time_ms"`
+	PipelineTimings     PipelineTimings     `json:"pipeline_timings" bson:"pipeline_timings"`
 	PerformanceTargetMS float64             `json:"performance_target_ms" bson:"performance_target_ms"`
 	TargetMet           bool                `json:"target_met" bson:"target_met"`
 	Cached              bool                `json:"cached" bson:"cached"`
@@ -130,6 +150,10 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		},
 		"training_runs":  {{Keys: bson.D{{Key: "created_at", Value: -1}}}},
 		"cluster_events": {{Keys: bson.D{{Key: "created_at", Value: -1}}}},
+		"users": {{
+			Keys:    bson.D{{Key: "username", Value: 1}},
+			Options: options.Index().SetUnique(true),
+		}},
 	}
 	for collection, models := range indexes {
 		if _, err := s.db.Collection(collection).Indexes().CreateMany(ctx, models); err != nil {
@@ -137,6 +161,82 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) EnsureAdminUser(ctx context.Context, username, password string) error {
+	username = normalizeUsername(username)
+	if username == "" || password == "" {
+		return errors.New("admin username and password are required")
+	}
+	var existing User
+	err := s.db.Collection("users").FindOne(ctx, bson.M{"username": username}).Decode(&existing)
+	if err == nil {
+		if existing.Role != "admin" {
+			_, err = s.db.Collection("users").UpdateOne(ctx, bson.M{"_id": existing.ID}, bson.M{"$set": bson.M{"role": "admin"}})
+		}
+		return err
+	}
+	if !errors.Is(err, mongo.ErrNoDocuments) {
+		return err
+	}
+	_, err = s.CreateUser(ctx, username, password, "admin")
+	return err
+}
+
+func (s *Store) CreateUser(ctx context.Context, username, password, role string) (User, error) {
+	username = normalizeUsername(username)
+	if username == "" {
+		return User{}, errors.New("username is required")
+	}
+	if len(password) < 6 {
+		return User{}, errors.New("password must contain at least 6 characters")
+	}
+	if role == "" {
+		role = "user"
+	}
+	if role != "user" && role != "admin" {
+		return User{}, errors.New("role must be user or admin")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, err
+	}
+	user := User{
+		ID: newID(), Username: username, PasswordHash: string(hash),
+		Role: role, CreatedAt: time.Now().UTC(),
+	}
+	_, err = s.db.Collection("users").InsertOne(ctx, user)
+	if mongo.IsDuplicateKeyError(err) {
+		return User{}, errors.New("username already exists")
+	}
+	return user, err
+}
+
+func (s *Store) AuthenticateUser(ctx context.Context, username, password string) (User, error) {
+	var user User
+	err := s.db.Collection("users").FindOne(ctx, bson.M{"username": normalizeUsername(username)}).Decode(&user)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return User{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return User{}, err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return User{}, ErrInvalidCredentials
+	}
+	if user.Role == "" {
+		user.Role = "user"
+	}
+	return user, nil
+}
+
+func (s *Store) UserByUsername(ctx context.Context, username string) (User, error) {
+	var user User
+	err := s.db.Collection("users").FindOne(ctx, bson.M{"username": normalizeUsername(username)}).Decode(&user)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return User{}, ErrNotFound
+	}
+	return user, err
 }
 
 func (s *Store) EnsureInitialModel(ctx context.Context, model ml.Model) (ml.Model, error) {
@@ -293,4 +393,8 @@ func newID() string {
 		return time.Now().UTC().Format("20060102T150405.000000000")
 	}
 	return hex.EncodeToString(value[:])
+}
+
+func normalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
 }

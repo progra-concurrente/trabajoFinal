@@ -59,14 +59,27 @@ services:
       - "8080:8080"
       - "9000:9000"
     volumes:
-      - ./data/processed/forecast_model.json:/app/data/processed/forecast_model.json:ro
-      - ./data/processed/sustainability_report.json:/app/data/processed/sustainability_report.json:ro
+      - ./data/processed:/app/data/processed:ro
       - ./docs/openapi.yaml:/app/docs/openapi.yaml:ro
     depends_on:
       mongodb:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    environment:
+      VITE_API_BASE_URL: "http://localhost:8080"
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - powersight-frontend-node-modules:/app/node_modules
+    depends_on:
+      - api
 
   ml-node-1:
     build:
@@ -107,3 +120,4 @@ services:
 volumes:
   powersight-mongodb:
   powersight-redis:
+  powersight-frontend-node-modules:

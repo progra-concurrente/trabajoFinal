@@ -38,6 +38,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("seed initial model: %v", err)
 	}
+	if err := db.EnsureAdminUser(ctx, env("API_USERNAME", "admin"), env("API_PASSWORD", "powersight")); err != nil {
+		log.Fatalf("seed admin user: %v", err)
+	}
 
 	eventSink := func(ctx context.Context, event cluster.Event) {
 		db.SaveClusterEvent(ctx, event)
@@ -58,8 +61,6 @@ func main() {
 
 	authService := auth.New(
 		env("JWT_SECRET", "change-this-development-secret"),
-		env("API_USERNAME", "admin"),
-		env("API_PASSWORD", "powersight"),
 		envDuration("JWT_TTL", 8*time.Hour),
 	)
 	server := api.New(db, redis, coordinator, authService, hub, initial,

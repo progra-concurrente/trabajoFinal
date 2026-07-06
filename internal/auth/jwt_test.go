@@ -6,19 +6,19 @@ import (
 )
 
 func TestLoginAndParseJWT(t *testing.T) {
-	service := New("test-secret", "admin", "password", time.Hour)
-	token, err := service.Login("admin", "password")
+	service := New("test-secret", time.Hour)
+	token, err := service.Issue("admin", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	username, err := service.Parse(token)
+	identity, err := service.Parse(token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if username != "admin" {
-		t.Fatalf("unexpected username %q", username)
+	if identity.Username != "admin" || identity.Role != "admin" {
+		t.Fatalf("unexpected identity %+v", identity)
 	}
-	if _, err := service.Login("admin", "wrong"); err == nil {
-		t.Fatal("expected invalid credentials")
+	if _, err := service.Issue("", "user"); err == nil {
+		t.Fatal("expected username validation")
 	}
 }

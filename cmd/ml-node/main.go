@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -83,6 +84,7 @@ func run(ctx context.Context, nodeID, address, datasetPath string, capacity int)
 type workerRuntime struct {
 	datasetPath string
 	capacity    int
+	activeJobs  int64
 	loadMu      sync.Mutex
 	records     []ml.Record
 }
@@ -107,9 +109,26 @@ func (w *workerRuntime) handle(message protocol.Message) protocol.Message {
 	}
 	switch message.Type {
 	case protocol.Heartbeat:
-		response, _ := protocol.NewMessage(message.ID, protocol.Heartbeat, map[string]int64{"received_at": time.Now().UnixMilli()})
+		records := 0
+		if w.records != nil {
+			records = len(w.records)
+		}
+		activeJobs := int(atomic.LoadInt64(&w.activeJobs))
+		cpu := 0.0
+		if w.capacity > 0 {
+			cpu = float64(activeJobs) / float64(w.capacity) * 100
+			if cpu > 100 {
+				cpu = 100
+			}
+		}
+		response, _ := protocol.NewMessage(message.ID, protocol.Heartbeat, protocol.HeartbeatStatus{
+			ReceivedAt: time.Now().UnixMilli(), ActiveJobs: activeJobs, Capacity: w.capacity,
+			CPUUsagePercent: cpu, LoadedRecordRows: records,
+		})
 		return response
 	case protocol.Predict:
+		atomic.AddInt64(&w.activeJobs, 1)
+		defer atomic.AddInt64(&w.activeJobs, -1)
 		var payload struct {
 			Model    ml.Model            `json:"model"`
 			Features ml.ForecastFeatures `json:"features"`
@@ -124,6 +143,8 @@ func (w *workerRuntime) handle(message protocol.Message) protocol.Message {
 		response, _ := protocol.NewMessage(message.ID, protocol.Predict, prediction)
 		return response
 	case protocol.TrainInit:
+		atomic.AddInt64(&w.activeJobs, 1)
+		defer atomic.AddInt64(&w.activeJobs, -1)
 		records, err := w.loadRecords()
 		if err != nil {
 			return errorMessage(err)
@@ -131,6 +152,8 @@ func (w *workerRuntime) handle(message protocol.Message) protocol.Message {
 		response, _ := protocol.NewMessage(message.ID, protocol.TrainInit, protocol.TrainInitResult{Rows: len(records)})
 		return response
 	case protocol.TrainEpoch:
+		atomic.AddInt64(&w.activeJobs, 1)
+		defer atomic.AddInt64(&w.activeJobs, -1)
 		var payload protocol.TrainEpochPayload
 		if err := protocol.UnmarshalPayload(message, &payload); err != nil {
 			return errorMessage(err)

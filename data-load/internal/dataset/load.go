@@ -170,6 +170,11 @@ func LoadData(root string, workers, total, chunkSize int) {
 		Name:     "Escritura del modelo ML",
 		Duration: time.Since(stageStart),
 	})
+	pipelineMetrics := buildPipelineMetrics(workers, stats, len(forecastRecords), model, stageDurations)
+	if err := savePipelineMetricsJSON(filepath.Join(outputDir, "pipeline_metrics.json"), pipelineMetrics); err != nil {
+		fmt.Printf("Error saving pipeline metrics: %v\n", err)
+		return
+	}
 
 	fmt.Printf("Rows read: %d\n", stats.LinesRead)
 	fmt.Printf("Rows clean: %d\n", stats.RowsClean)
@@ -182,6 +187,7 @@ func LoadData(root string, workers, total, chunkSize int) {
 	printClassificationMetrics("Training metrics", model.TrainingMetrics)
 	printClassificationMetrics("Test metrics", model.TestMetrics)
 	fmt.Printf("Sustainability report: %s\n", filepath.Join(outputDir, "sustainability_report.json"))
+	fmt.Printf("Pipeline metrics: %s\n", filepath.Join(outputDir, "pipeline_metrics.json"))
 	printTimingSummary(stageDurations)
 }
 
@@ -217,6 +223,27 @@ func printTimingSummary(stages []stageDuration) {
 		fmt.Printf("- %-40s %12.3f ms\n", stage.Name+":", durationMilliseconds(stage.Duration))
 	}
 	fmt.Printf("- %-40s %12.3f ms\n", "TOTAL (suma de etapas):", durationMilliseconds(total))
+}
+
+func buildPipelineMetrics(workers int, stats LoadStats, forecastRows int, model LogisticModel, stages []stageDuration) PipelineMetrics {
+	metrics := PipelineMetrics{
+		GeneratedAt:    time.Now().UTC(),
+		Workers:        workers,
+		RowsRead:       stats.LinesRead,
+		RowsClean:      stats.RowsClean,
+		DroppedMissing: stats.DroppedMissing,
+		DroppedInvalid: stats.DroppedInvalid,
+		ForecastRows:   forecastRows,
+		TrainRows:      model.TrainRows,
+		TestRows:       model.TestRows,
+		Stages:         make([]PipelineStageMetric, 0, len(stages)),
+	}
+	for _, stage := range stages {
+		duration := durationMilliseconds(stage.Duration)
+		metrics.Stages = append(metrics.Stages, PipelineStageMetric{Name: stage.Name, DurationMS: duration})
+		metrics.TotalDurationMS += duration
+	}
+	return metrics
 }
 
 func durationMilliseconds(duration time.Duration) float64 {

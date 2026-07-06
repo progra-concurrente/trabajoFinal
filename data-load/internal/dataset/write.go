@@ -98,6 +98,18 @@ func saveSustainabilityReportJSON(filePath string, report SustainabilityReport) 
 	return encoder.Encode(report)
 }
 
+func savePipelineMetricsJSON(filePath string, metrics PipelineMetrics) error {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(metrics)
+}
+
 func saveAggregatesCSV(filePath string, aggregates []DemandAggregate) error {
 	file, err := os.Create(filePath)
 	if err != nil {

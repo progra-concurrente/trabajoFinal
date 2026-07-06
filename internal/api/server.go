@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -76,8 +77,40 @@ type reportAggregate struct {
 	HighConsumptionRate float64 `json:"high_consumption_rate"`
 }
 type reportDocument struct {
-	Hourly  []reportAggregate `json:"hourly_patterns"`
-	DayHour []reportAggregate `json:"day_hour_patterns"`
+	PeakHours    []reportAggregate `json:"peak_hours"`
+	PeakDayHours []reportAggregate `json:"peak_day_hours"`
+	Hourly       []reportAggregate `json:"hourly_patterns"`
+	DayHour      []reportAggregate `json:"day_hour_patterns"`
+}
+
+type modelMetrics struct {
+	Workers          int     `json:"workers"`
+	Rows             int     `json:"rows"`
+	TrainRows        int     `json:"train_rows"`
+	TestRows         int     `json:"test_rows"`
+	Accuracy         float64 `json:"accuracy"`
+	Loss             float64 `json:"loss"`
+	Recall           float64 `json:"recall"`
+	Precision        float64 `json:"precision"`
+	F1Score          float64 `json:"f1_score"`
+	BalancedAccuracy float64 `json:"balanced_accuracy"`
+}
+
+type pipelineMetricsDocument struct {
+	GeneratedAt    time.Time `json:"generated_at"`
+	Workers        int       `json:"workers"`
+	RowsRead       int       `json:"rows_read"`
+	RowsClean      int       `json:"rows_clean"`
+	DroppedMissing int       `json:"dropped_missing"`
+	DroppedInvalid int       `json:"dropped_invalid"`
+	ForecastRows   int       `json:"forecast_rows"`
+	TrainRows      int       `json:"train_rows"`
+	TestRows       int       `json:"test_rows"`
+	Stages         []struct {
+		Name       string  `json:"name"`
+		DurationMS float64 `json:"duration_ms"`
+	} `json:"stages"`
+	TotalDurationMS float64 `json:"total_duration_ms"`
 }
 
 func New(db *store.Store, redis *cache.Cache, coordinator *cluster.Coordinator, authService *auth.Service,
@@ -100,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("POST /api/v1/auth/register", s.register)
 	mux.HandleFunc("GET /openapi.yaml", s.openAPI)
 	mux.HandleFunc("GET /swagger/", s.swagger)
 	protected := http.NewServeMux()
@@ -112,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("GET /api/v1/models/active", s.getActiveModel)
 	protected.HandleFunc("GET /api/v1/cluster/nodes", s.getNodes)
 	protected.HandleFunc("GET /api/v1/reports/sustainability", s.getSustainabilityReport)
+	protected.HandleFunc("GET /api/v1/admin/metrics", s.getAdminMetrics)
 	mux.Handle("/api/v1/", s.auth.Middleware(protected))
 	mux.HandleFunc("GET /ws", s.websocket)
 	return recoveryMiddleware(loggingMiddleware(corsMiddleware(mux)))
@@ -125,20 +160,53 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	token, err := s.auth.Login(request.Username, request.Password)
+	user, err := s.store.AuthenticateUser(r.Context(), request.Username, request.Password)
 	if err != nil {
 		writeError(w, 401, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in_seconds": 28800})
+	token, err := s.auth.Issue(user.Username, user.Role)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"access_token": token, "token_type": "Bearer", "expires_in_seconds": 28800,
+		"user": map[string]any{"username": user.Username, "role": user.Role},
+	})
+}
+
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	user, err := s.store.CreateUser(r.Context(), request.Username, request.Password, "user")
+	if err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	token, err := s.auth.Issue(user.Username, user.Role)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, 201, map[string]any{
+		"access_token": token, "token_type": "Bearer", "expires_in_seconds": 28800,
+		"user": map[string]any{"username": user.Username, "role": user.Role},
+	})
 }
 
 func (s *Server) createForecast(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
 	var request forecastRequest
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	record, err := s.forecast(r.Context(), request)
+	record, err := s.forecast(r.Context(), request, receivedAt)
 	if err != nil {
 		writeError(w, 400, err)
 		return
@@ -146,17 +214,21 @@ func (s *Server) createForecast(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, record)
 }
 
-func (s *Server) forecast(ctx context.Context, request forecastRequest) (store.ForecastRecord, error) {
+func (s *Server) forecast(ctx context.Context, request forecastRequest, receivedAt time.Time) (store.ForecastRecord, error) {
 	started := time.Now()
+	timings := store.PipelineTimings{ReceiveParseMS: milliseconds(started.Sub(receivedAt))}
+	transformStarted := time.Now()
 	features, latest, current, contextInfo, err := s.buildForecastFeatures(request)
 	if err != nil {
 		return store.ForecastRecord{}, err
 	}
+	timings.TransformFeaturesMS = milliseconds(time.Since(transformStarted))
 	s.modelMu.RLock()
 	model := s.activeModel
 	s.modelMu.RUnlock()
 	key := forecastCacheKey(model.Version, features)
 	var inference cachedInference
+	inferenceStarted := time.Now()
 	cached, cacheErr := s.cache.GetJSON(ctx, key, &inference)
 	if cacheErr != nil {
 		log.Printf("redis forecast read: %v", cacheErr)
@@ -171,9 +243,14 @@ func (s *Server) forecast(ctx context.Context, request forecastRequest) (store.F
 		clusterLatency = result.LatencyMS
 		_ = s.cache.SetJSON(context.Background(), key, inference, 5*time.Minute)
 	}
+	timings.InferenceMS = milliseconds(time.Since(inferenceStarted))
+	recommendationStarted := time.Now()
 	risk := riskLevel(inference.Probability, model.DecisionThreshold)
 	recommendation := recommendationFor(current, risk, features.RecentActivePowerTrend, contextInfo)
+	timings.RecommendationMS = milliseconds(time.Since(recommendationStarted))
 	elapsed := float64(time.Since(started)) / float64(time.Millisecond)
+	persistStarted := time.Now()
+	timings.PersistenceEnqueueMS = milliseconds(time.Since(persistStarted))
 	record := store.ForecastRecord{
 		ID: newRequestID(), UserID: auth.User(ctx), ObservedAt: latest.UTC(), ObservedAtLocal: latest.Format(time.RFC3339),
 		CurrentStatus: current, Features: features, HorizonMinutes: forecastHorizon,
@@ -181,7 +258,7 @@ func (s *Server) forecast(ctx context.Context, request forecastRequest) (store.F
 		Probability: inference.Probability, Class: inference.Class, RiskLevel: risk, Context: contextInfo,
 		Recommendation: recommendation, NodeID: inference.NodeID, ModelID: model.ID, ModelVersion: model.Version,
 		ClusterLatencyMS: clusterLatency, ProcessingTimeMS: elapsed, PerformanceTargetMS: performanceTargetMS,
-		TargetMet: elapsed < performanceTargetMS, Cached: cached, CreatedAt: time.Now().UTC(),
+		PipelineTimings: timings, TargetMet: elapsed < performanceTargetMS, Cached: cached, CreatedAt: time.Now().UTC(),
 	}
 	s.enqueuePersistence(record)
 	go s.hub.Broadcast("forecast.created", record)
@@ -272,7 +349,7 @@ func riskLevel(probability, threshold float64) string {
 	if probability >= threshold {
 		return "alto"
 	}
-	if probability >= .35 {
+	if probability >= threshold*.75 {
 		return "moderado"
 	}
 	return "bajo"
@@ -499,6 +576,116 @@ func (s *Server) getSustainabilityReport(w http.ResponseWriter, r *http.Request)
 	_ = s.cache.SetJSON(r.Context(), "report:sustainability:v2", report, 24*time.Hour)
 	writeJSON(w, 200, report)
 }
+
+func (s *Server) getAdminMetrics(w http.ResponseWriter, r *http.Request) {
+	if !auth.IsAdmin(r.Context()) {
+		writeError(w, http.StatusForbidden, errors.New("admin role required"))
+		return
+	}
+	mongoStatus, redisStatus, clusterStatus := "up", "up", "up"
+	if s.store.Ping(r.Context()) != nil {
+		mongoStatus = "down"
+	}
+	if s.cache.Ping(r.Context()) != nil {
+		redisStatus = "down"
+	}
+	nodes := s.cluster.Nodes()
+	if s.cluster.HealthyCount() == 0 {
+		clusterStatus = "down"
+	}
+	s.modelMu.RLock()
+	model := s.activeModel
+	s.modelMu.RUnlock()
+	metrics := parseModelMetrics(model)
+	var report reportDocument
+	if data, err := os.ReadFile(s.reportPath); err == nil {
+		_ = json.Unmarshal(data, &report)
+	}
+	pipelineMetrics := s.loadPipelineMetrics()
+	writeJSON(w, 200, map[string]any{
+		"health": map[string]any{
+			"mongodb": mongoStatus, "redis": redisStatus, "cluster": clusterStatus,
+			"healthy_nodes": s.cluster.HealthyCount(),
+		},
+		"cluster": map[string]any{
+			"nodes": nodes, "node_count": len(nodes), "healthy_nodes": s.cluster.HealthyCount(),
+		},
+		"model": map[string]any{
+			"id": model.ID, "version": model.Version, "type": model.ModelType, "target": model.Target,
+			"threshold_kw": model.Threshold, "decision_threshold": model.DecisionThreshold,
+			"history_minutes": model.HistoryMinutes, "horizon_minutes": model.HorizonMinutes,
+			"sustained_minutes": model.SustainedMinutes, "epochs": model.Epochs,
+			"learning_rate": model.LearningRate, "feature_count": len(model.Features),
+		},
+		"processing": map[string]any{
+			"workers": metrics.Workers, "rows": metrics.Rows, "train_rows": metrics.TrainRows,
+			"test_rows": metrics.TestRows, "accuracy": metrics.Accuracy, "recall": metrics.Recall,
+			"precision": metrics.Precision, "f1_score": metrics.F1Score,
+			"balanced_accuracy": metrics.BalancedAccuracy, "loss": metrics.Loss,
+		},
+		"etl_initial_training": pipelineMetrics,
+		"social_impact": map[string]any{
+			"threshold_kw": model.Threshold, "peak_hours": topReportItems(firstNonEmpty(report.PeakHours, report.Hourly), 5),
+			"peak_day_hours": topReportItems(firstNonEmpty(report.PeakDayHours, report.DayHour), 5),
+		},
+	})
+}
+
+func (s *Server) loadPipelineMetrics() map[string]any {
+	path := filepath.Join(filepath.Dir(s.reportPath), "pipeline_metrics.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]any{
+			"available": false,
+			"path":      path,
+			"command":   "go run ./data-load/cmd -root . -workers 8",
+			"message":   "No hay metricas persistidas del ETL inicial. Ejecuta el pipeline para generar data/processed/pipeline_metrics.json.",
+		}
+	}
+	var document pipelineMetricsDocument
+	if err := json.Unmarshal(data, &document); err != nil {
+		return map[string]any{"available": false, "path": path, "message": "El archivo de metricas del pipeline no es JSON valido."}
+	}
+	return map[string]any{
+		"available":         true,
+		"path":              path,
+		"generated_at":      document.GeneratedAt,
+		"workers":           document.Workers,
+		"rows_read":         document.RowsRead,
+		"rows_clean":        document.RowsClean,
+		"dropped_missing":   document.DroppedMissing,
+		"dropped_invalid":   document.DroppedInvalid,
+		"forecast_rows":     document.ForecastRows,
+		"train_rows":        document.TrainRows,
+		"test_rows":         document.TestRows,
+		"stages":            document.Stages,
+		"total_duration_ms": document.TotalDurationMS,
+	}
+}
+
+func parseModelMetrics(model ml.Model) modelMetrics {
+	return modelMetrics{
+		Workers: model.Workers, Rows: model.Rows, TrainRows: model.TrainRows, TestRows: model.TestRows,
+		Accuracy: model.Accuracy, Loss: model.Loss, Recall: model.TestMetrics.Recall,
+		Precision: model.TestMetrics.Precision, F1Score: model.TestMetrics.F1Score,
+		BalancedAccuracy: model.TestMetrics.BalancedAccuracy,
+	}
+}
+
+func topReportItems(items []reportAggregate, limit int) []reportAggregate {
+	if len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func firstNonEmpty(primary, fallback []reportAggregate) []reportAggregate {
+	if len(primary) > 0 {
+		return primary
+	}
+	return fallback
+}
+
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	mongoStatus, redisStatus, clusterStatus := "up", "up", "up"
 	if s.store.Ping(r.Context()) != nil {
@@ -517,8 +704,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, map[string]any{"status": map[bool]string{true: "ok", false: "degraded"}[status == 200], "mongodb": mongoStatus, "redis": redisStatus, "cluster": clusterStatus, "healthy_nodes": s.cluster.HealthyCount()})
 }
 func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
-	username, err := s.auth.Parse(r.URL.Query().Get("token"))
-	if err != nil || username == "" {
+	identity, err := s.auth.Parse(r.URL.Query().Get("token"))
+	if err != nil || identity.Username == "" {
 		writeError(w, 401, errors.New("valid token required"))
 		return
 	}
@@ -579,6 +766,11 @@ func optionalTime(value string) (*time.Time, error) {
 	}
 	return &parsed, nil
 }
+
+func milliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

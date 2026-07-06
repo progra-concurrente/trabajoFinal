@@ -29,6 +29,9 @@ type NodeInfo struct {
 	Capacity       int       `json:"capacity"`
 	ModelVersion   string    `json:"model_version"`
 	Healthy        bool      `json:"healthy"`
+	ActiveJobs     int       `json:"active_jobs"`
+	CPUUsage       float64   `json:"cpu_usage_percent"`
+	LoadedRows     int       `json:"loaded_record_rows"`
 	JobsCompleted  uint64    `json:"jobs_completed"`
 	Errors         uint64    `json:"errors"`
 	AverageLatency float64   `json:"average_latency_ms"`
@@ -213,7 +216,7 @@ func (c *Coordinator) heartbeatLoop() {
 		case <-ticker.C:
 			for _, node := range c.snapshotNodes(false) {
 				ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout)
-				_, err := c.call(ctx, node, protocol.Heartbeat, map[string]int64{"sent_at": time.Now().UnixMilli()})
+				response, err := c.call(ctx, node, protocol.Heartbeat, map[string]int64{"sent_at": time.Now().UnixMilli()})
 				cancel()
 				c.mu.Lock()
 				if current := c.nodes[node.info.ID]; current == node {
@@ -227,6 +230,15 @@ func (c *Coordinator) heartbeatLoop() {
 						node.failures = 0
 						node.info.Healthy = true
 						node.info.LastSeen = time.Now()
+						var status protocol.HeartbeatStatus
+						if protocol.UnmarshalPayload(response, &status) == nil {
+							node.info.ActiveJobs = status.ActiveJobs
+							node.info.CPUUsage = status.CPUUsagePercent
+							node.info.LoadedRows = status.LoadedRecordRows
+							if status.Capacity > 0 {
+								node.info.Capacity = status.Capacity
+							}
+						}
 					}
 				}
 				c.mu.Unlock()
